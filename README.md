@@ -4,7 +4,7 @@ Application Android locale pour les stocks et les inventaires. Android 10 ou plu
 
 ## Compilation
 
-Utiliser JDK 17 et Android SDK 35. Lancer `./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`. Avec un appareil ou émulateur démarré, lancer `./gradlew :app:connectedDebugAndroidTest`. GitHub Actions fournit l’artefact **SimpleTools-Inventory-Android-APK** avec la somme SHA-256.
+Utiliser JDK 17 et Android SDK 36. Lancer `./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`. Avec un appareil ou émulateur démarré, lancer `./gradlew :app:connectedDebugAndroidTest`. GitHub Actions fournit l’artefact **SimpleTools-Inventory-Android-APK** avec la somme SHA-256.
 
 ## Règles de données
 

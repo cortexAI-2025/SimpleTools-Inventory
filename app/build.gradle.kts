@@ -1,5 +1,5 @@
 plugins {
-    id("com.android.application") version "8.8.2"
+    id("com.android.application") version "8.10.1"
     id("org.jetbrains.kotlin.android") version "2.1.10"
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.10"
     id("org.jetbrains.kotlin.plugin.serialization") version "2.1.10"
@@ -11,11 +11,11 @@ require(playKey.matches(Regex("[A-Za-z0-9+/=]*"))) { "inventoryPlayPublicKey mus
 
 android {
     namespace = "com.simpletools.inventory"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.simpletools.inventory"
         minSdk = 29
-        targetSdk = 35
+        targetSdk = 36
         buildConfigField("String", "PLAY_PUBLIC_KEY", "\"$playKey\"")
         versionCode = 2
         versionName = "1.3.0"

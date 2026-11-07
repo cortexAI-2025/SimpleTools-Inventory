@@ -15,11 +15,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Configure Android SDK 35
-        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"'
+      - name: Configure Android SDK 36
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0"'
       - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       - name: Compile, test, lint and build
+        env:
+          ORG_GRADLE_PROJECT_inventoryPlayPublicKey: ${{ vars.INVENTORY_PLAY_PUBLIC_KEY }}
         run: ./gradlew --stacktrace :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest :app:bundleRelease
       - name: Verify APK, permissions and checksum
         run: |
@@ -29,6 +31,23 @@ jobs:
           cd dist
           apk=SimpleTools-Inventory-1.3.0-debug.apk
           "$tools/apksigner" verify "$apk"
+          "$tools/zipalign" -c -P 16 4 "$apk"
+          "$tools/aapt" dump badging "$apk" > badging.txt
+          grep -Fx "targetSdkVersion:'36'" badging.txt
+          native="$(mktemp -d)"
+          trap 'rm -rf "$native"' EXIT
+          unzip -q "$apk" 'lib/*/*.so' -d "$native"
+          for library in "$native"/lib/{arm64-v8a,x86_64}/*.so; do
+            test -f "$library"
+            alignments="$(readelf -lW "$library" | awk '$1 == "LOAD" { print $NF }')"
+            test -n "$alignments"
+            for alignment in $alignments; do
+              if (( alignment < 16384 )); then
+                echo "ELF segment is not 16 KiB aligned in $library"
+                exit 1
+              fi
+            done
+          done
           "$tools/aapt" dump permissions "$apk" | tee permissions.txt
           if grep -Eq 'android.permission.(INTERNET|ACCESS_NETWORK_STATE|READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|READ_MEDIA_IMAGES)' permissions.txt; then
             exit 1
@@ -61,8 +80,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Configure Android SDK 35
-        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"'
+      - name: Configure Android SDK 36
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0"'
       - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       - name: Enable KVM
