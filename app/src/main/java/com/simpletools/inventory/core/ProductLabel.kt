@@ -13,7 +13,7 @@ fun Item.labelCode(): String = code ?: id
 fun writeProductLabel(item: Item, output: OutputStream) {
     val value = item.labelCode()
     val writer = MultiFormatWriter()
-    val linear = value.length <= 48 && value.all { it in ' '..'~' }
+    val linear = value.length <= 24 && value.all { it in ' '..'~' }
     val matrix = if (linear) writer.encode(value, BarcodeFormat.CODE_128, 480, 90)
         else writer.encode(value, BarcodeFormat.QR_CODE, 360, 360, mapOf(EncodeHintType.CHARACTER_SET to "UTF-8"))
     val pdf = PdfDocument()

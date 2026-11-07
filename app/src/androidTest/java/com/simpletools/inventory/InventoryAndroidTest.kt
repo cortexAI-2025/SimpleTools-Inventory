@@ -3,6 +3,7 @@ package com.simpletools.inventory
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.pdf.PdfRenderer
 import android.nfc.NdefRecord
 import android.os.ParcelFileDescriptor
@@ -170,10 +171,12 @@ class InventoryAndroidTest {
             val fresh = repo.save(Item(name = "Étiquette"))
             val labeled = repo.createLabelCode(fresh.id)
             assertEquals(labeled.id, repo.dao.byCode(labeled.labelCode())?.id)
-            val bytes = ByteArrayOutputStream()
-            writeProductLabel(labeled, bytes)
-            assertTrue(bytes.toString("ISO-8859-1").startsWith("%PDF-"))
-            assertPrintedLabelDecodes(labeled.labelCode(), bytes.toByteArray())
+            for (fixture in listOf(labeled, labeled.copy(code = "INV-24"))) {
+                val bytes = ByteArrayOutputStream()
+                writeProductLabel(fixture, bytes)
+                assertTrue(bytes.toString("ISO-8859-1").startsWith("%PDF-"))
+                assertPrintedLabelDecodes(fixture.labelCode(), bytes.toByteArray())
+            }
         }
     }
 
@@ -184,13 +187,18 @@ class InventoryAndroidTest {
             val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
             PdfRenderer(fd).use { renderer ->
                 renderer.openPage(0).use { page ->
-                    val bitmap = Bitmap.createBitmap(page.width * 2, page.height * 2, Bitmap.Config.ARGB_8888)
+                    // Render the area a user frames with the camera, at three pixels per PDF point.
+                    val bitmap = Bitmap.createBitmap(936, 576, Bitmap.Config.ARGB_8888)
+                    val frame = Matrix().apply {
+                        setScale(3f, 3f)
+                        postTranslate(-90f, -270f)
+                    }
                     val client = BarcodeScanning.getClient()
                     try {
                         bitmap.eraseColor(Color.WHITE)
-                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                        page.render(bitmap, null, frame, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
                         val result = Tasks.await(client.process(InputImage.fromBitmap(bitmap, 0)), 20, TimeUnit.SECONDS)
-                        assertTrue(result.any { it.rawValue == expected })
+                        assertTrue("Could not scan $expected from rendered label", result.any { it.rawValue == expected })
                     } finally {
                         client.close()
                         bitmap.recycle()
