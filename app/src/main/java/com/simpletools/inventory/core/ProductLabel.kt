@@ -15,7 +15,8 @@ fun writeProductLabel(item: Item, output: OutputStream) {
     val linear = value.length <= 48 && value.all { it in ' '..'~' }
     val matrix = if (linear) writer.encode(value, BarcodeFormat.CODE_128, 480, 90)
         else writer.encode(value, BarcodeFormat.QR_CODE, 360, 360)
-    PdfDocument().use { pdf ->
+    val pdf = PdfDocument()
+    try {
         val page = pdf.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())
         val canvas = page.canvas
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 16f; color = Color.BLACK }
@@ -47,5 +48,7 @@ fun writeProductLabel(item: Item, output: OutputStream) {
         line(value, top + matrix.height * scale + 18f)
         pdf.finishPage(page)
         pdf.writeTo(output)
+    } finally {
+        pdf.close()
     }
 }

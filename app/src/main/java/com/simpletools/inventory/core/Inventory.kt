@@ -156,6 +156,7 @@ interface InventoryDao {
     @Query("SELECT * FROM Session WHERE id = :id") suspend fun session(id: String): Session?
     @Upsert suspend fun putSession(session: Session)
     @Query("SELECT * FROM Count WHERE sessionId = :id ORDER BY name COLLATE NOCASE, itemId") fun counts(id: String): Flow<List<Count>>
+    @Query("SELECT * FROM Count WHERE sessionId = :session AND itemId = :item") suspend fun count(session: String, item: String): Count?
     @Query("SELECT * FROM Count WHERE sessionId = :id ORDER BY name COLLATE NOCASE, itemId") suspend fun sessionCounts(id: String): List<Count>
     @Query("SELECT * FROM Count") suspend fun allCounts(): List<Count>
     @Upsert suspend fun putCount(count: Count)
@@ -291,7 +292,7 @@ class InventoryRepository(val db: InventoryDatabase, private val licensed: () ->
         requirePro()
         require(actual in 0..LIMIT)
         require(requireNotNull(dao.session(session)).closed == null)
-        val row = requireNotNull(dao.sessionCounts(session).find { it.itemId == item })
+        val row = requireNotNull(dao.count(session, item))
         dao.putCount(row.copy(actual = actual))
     }
 
@@ -303,7 +304,8 @@ class InventoryRepository(val db: InventoryDatabase, private val licensed: () ->
         require(counted.isNotEmpty())
         for (row in counted) {
             val item = requireNotNull(dao.item(row.itemId))
-            require(item.quantity == row.expected && item.unit == row.unit) { "changed" }
+            require(item.quantity == row.expected && item.unit == row.unit &&
+                (header.inventory == null || header.inventory == item.inventory)) { "changed" }
             applyMovement(item, Kind.COUNT, requireNotNull(row.actual), header.name, "", session)
         }
         dao.putSession(header.copy(closed = System.currentTimeMillis()))

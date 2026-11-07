@@ -310,7 +310,7 @@ private fun InventoryApp(model: InventoryViewModel) {
                                     val item = if (current.nfc) dao.byNfc(value) else dao.byCode(value)
                                     screen = if (session != null) {
                                         val header = requireNotNull(dao.session(session))
-                                        if (item == null || dao.sessionCounts(session).none { it.itemId == item.id }) {
+                                        if (item == null || dao.count(session, item.id) == null) {
                                             message = tr("Article absent de cette session.", "Item is absent from this session.")
                                             Screen.Counting(header)
                                         } else Screen.Counting(header, item.id)

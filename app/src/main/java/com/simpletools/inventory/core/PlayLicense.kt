@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.security.KeyFactory
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
@@ -68,7 +69,7 @@ class PlayLicense(private val context: Context, private val scope: CoroutineScop
         scope.launch {
             lock.withLock {
                 try {
-                    synchronize(explicit)
+                    if (withTimeoutOrNull(25_000) { synchronize(explicit); true } != true) status(PlayStatus.UNAVAILABLE)
                 } catch (_: IOException) {
                     status(PlayStatus.UNAVAILABLE)
                 }
@@ -95,7 +96,7 @@ class PlayLicense(private val context: Context, private val scope: CoroutineScop
         }
         val (result, purchases) = suspendCancellableCoroutine { continuation ->
             client.queryPurchasesAsync(QueryPurchasesParams.newBuilder().setProductType(BillingClient.ProductType.INAPP).build()) {
-                response, owned -> continuation.resume(response to owned)
+                response, owned -> if (continuation.isActive) continuation.resume(response to owned)
             }
         }
         if (result.responseCode != BillingClient.BillingResponseCode.OK) {
@@ -122,7 +123,7 @@ class PlayLicense(private val context: Context, private val scope: CoroutineScop
         offer = suspendCancellableCoroutine { continuation ->
             client.queryProductDetailsAsync(QueryProductDetailsParams.newBuilder().setProductList(listOf(product)).build()) {
                 response, details ->
-                continuation.resume(if (response.responseCode == BillingClient.BillingResponseCode.OK)
+                if (continuation.isActive) continuation.resume(if (response.responseCode == BillingClient.BillingResponseCode.OK)
                     details.productDetailsList.firstOrNull { it.productId == PRO_PRODUCT } else null)
             }
         }
@@ -167,7 +168,7 @@ class PlayLicense(private val context: Context, private val scope: CoroutineScop
 
     private suspend fun acknowledge(purchase: Purchase): Boolean = suspendCancellableCoroutine { continuation ->
         client.acknowledgePurchase(AcknowledgePurchaseParams.newBuilder().setPurchaseToken(purchase.purchaseToken).build()) {
-            continuation.resume(it.responseCode == BillingClient.BillingResponseCode.OK)
+            if (continuation.isActive) continuation.resume(it.responseCode == BillingClient.BillingResponseCode.OK)
         }
     }
 
