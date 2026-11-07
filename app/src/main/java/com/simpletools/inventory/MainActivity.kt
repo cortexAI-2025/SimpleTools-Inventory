@@ -304,7 +304,8 @@ private fun InventoryApp(model: InventoryViewModel) {
                                 val session = current.session
                                 if (session != null) repo.requirePro()
                                 if (current.item != null) {
-                                    repo.save(current.item.copy(nfc = value))
+                                    if (current.nfc) repo.save(current.item.copy(nfc = value))
+                                    else repo.addCode(current.item.id, value)
                                     screen = Screen.Detail(current.item.id)
                                 } else {
                                     val item = if (current.nfc) dao.byNfc(value) else dao.byCode(value)
@@ -645,6 +646,9 @@ private fun InventoryApp(model: InventoryViewModel) {
                 Field(alternate, { alternate = it }, t("Code-barres supplémentaire", "Additional barcode"))
                 TextButton(enabled = !busy && alternate.isNotBlank(), onClick = { addCode(alternate) }) {
                     Text(t("Associer le code", "Link barcode"))
+                }
+                TextButton(enabled = !busy, onClick = { open(Screen.Scan(false, item)) }) {
+                    Text(t("Scanner un code supplémentaire", "Scan an additional barcode"))
                 }
                 if (item.code == null) Text(t("La première étiquette attribue automatiquement un code à la fiche.",
                     "The first label automatically assigns a code to the item."))

@@ -4,6 +4,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
 import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 import java.io.OutputStream
 
@@ -14,7 +15,7 @@ fun writeProductLabel(item: Item, output: OutputStream) {
     val writer = MultiFormatWriter()
     val linear = value.length <= 48 && value.all { it in ' '..'~' }
     val matrix = if (linear) writer.encode(value, BarcodeFormat.CODE_128, 480, 90)
-        else writer.encode(value, BarcodeFormat.QR_CODE, 360, 360)
+        else writer.encode(value, BarcodeFormat.QR_CODE, 360, 360, mapOf(EncodeHintType.CHARACTER_SET to "UTF-8"))
     val pdf = PdfDocument()
     try {
         val page = pdf.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())

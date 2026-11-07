@@ -3,7 +3,9 @@ package com.simpletools.inventory
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.pdf.PdfRenderer
 import android.nfc.NdefRecord
+import android.os.ParcelFileDescriptor
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -23,6 +25,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
@@ -170,6 +173,32 @@ class InventoryAndroidTest {
             val bytes = ByteArrayOutputStream()
             writeProductLabel(labeled, bytes)
             assertTrue(bytes.toString("ISO-8859-1").startsWith("%PDF-"))
+            assertPrintedLabelDecodes(labeled.labelCode(), bytes.toByteArray())
+        }
+    }
+
+    private fun assertPrintedLabelDecodes(expected: String, pdf: ByteArray) {
+        val file = File.createTempFile("inventory-label", ".pdf", context.cacheDir)
+        try {
+            file.writeBytes(pdf)
+            val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            PdfRenderer(fd).use { renderer ->
+                renderer.openPage(0).use { page ->
+                    val bitmap = Bitmap.createBitmap(page.width * 2, page.height * 2, Bitmap.Config.ARGB_8888)
+                    val client = BarcodeScanning.getClient()
+                    try {
+                        bitmap.eraseColor(Color.WHITE)
+                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                        val result = Tasks.await(client.process(InputImage.fromBitmap(bitmap, 0)), 20, TimeUnit.SECONDS)
+                        assertTrue(result.any { it.rawValue == expected })
+                    } finally {
+                        client.close()
+                        bitmap.recycle()
+                    }
+                }
+            }
+        } finally {
+            file.delete()
         }
     }
 

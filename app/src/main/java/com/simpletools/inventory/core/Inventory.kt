@@ -4,7 +4,6 @@ import androidx.room.*
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.serialization.Serializable
 import java.math.BigDecimal
 import java.util.UUID
@@ -137,6 +136,7 @@ interface InventoryDao {
     @Query("SELECT * FROM Item WHERE code = :value OR id = (SELECT itemId FROM AlternateCode WHERE value = :value)") suspend fun byCode(value: String): Item?
     @Query("SELECT * FROM Item WHERE nfc = :value") suspend fun byNfc(value: String): Item?
     @Query("SELECT value FROM AlternateCode WHERE itemId = :id ORDER BY value") fun codes(id: String): Flow<List<String>>
+    @Query("SELECT itemId FROM AlternateCode WHERE value = :value") suspend fun alternateOwner(value: String): String?
     @Query("SELECT * FROM AlternateCode") suspend fun allCodes(): List<AlternateCode>
     @Insert suspend fun insertCode(code: AlternateCode)
     @Query("DELETE FROM AlternateCode WHERE itemId = :id AND value = :value") suspend fun deleteCode(id: String, value: String)
@@ -205,7 +205,7 @@ class InventoryRepository(val db: InventoryDatabase, private val licensed: () ->
             validateItem(normalized)
             require(initial in 0..LIMIT)
             require(normalized.code == null || normalized.code == old?.code ||
-                normalized.code !in dao.codes(item.id).first()) { "code" }
+                dao.alternateOwner(normalized.code) == null) { "code" }
             require(normalized.code?.let { dao.byCode(it)?.id in listOf(null, item.id) } != false) { "code" }
             require(normalized.nfc?.let { dao.byNfc(it)?.id in listOf(null, item.id) } != false) { "nfc" }
             require(old == null || old.unit == normalized.unit || old.quantity == 0L) { "unit" }

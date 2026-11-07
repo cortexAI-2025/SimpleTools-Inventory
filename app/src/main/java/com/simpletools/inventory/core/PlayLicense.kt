@@ -143,11 +143,11 @@ class PlayLicense(private val context: Context, private val scope: CoroutineScop
         val product = offer ?: return refresh()
         if (state.value.pro || state.value.status !in setOf(PlayStatus.READY, PlayStatus.NO_PURCHASE, PlayStatus.CANCELED)) return
         val oneTime = product.oneTimePurchaseOfferDetails ?: return
-        val details = BillingFlowParams.ProductDetailsParams.newBuilder()
-            .setProductDetails(product).setOfferToken(oneTime.offerToken).build()
+        val details = BillingFlowParams.ProductDetailsParams.newBuilder().setProductDetails(product)
+        oneTime.offerToken?.let { details.setOfferToken(it) }
         status(PlayStatus.LOADING)
         val result = client.launchBillingFlow(activity, BillingFlowParams.newBuilder()
-            .setProductDetailsParamsList(listOf(details)).build())
+            .setProductDetailsParamsList(listOf(details.build())).build())
         when (result.responseCode) {
             BillingClient.BillingResponseCode.OK -> Unit
             BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED -> refresh()
