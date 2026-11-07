@@ -1,23 +1,27 @@
 plugins {
-    id("com.android.application") version "8.8.2"
+    id("com.android.application") version "8.10.1"
     id("org.jetbrains.kotlin.android") version "2.1.10"
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.10"
     id("org.jetbrains.kotlin.plugin.serialization") version "2.1.10"
     id("org.jetbrains.kotlin.kapt") version "2.1.10"
 }
 
+val playKey = providers.gradleProperty("inventoryPlayPublicKey").orNull.orEmpty().trim()
+require(playKey.matches(Regex("[A-Za-z0-9+/=]*"))) { "inventoryPlayPublicKey must be Base64." }
+
 android {
     namespace = "com.simpletools.inventory"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.simpletools.inventory"
         minSdk = 29
-        targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        targetSdk = 36
+        buildConfigField("String", "PLAY_PUBLIC_KEY", "\"$playKey\"")
+        versionCode = 2
+        versionName = "1.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -44,5 +48,6 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.android.billingclient:billing:8.3.0")
 }

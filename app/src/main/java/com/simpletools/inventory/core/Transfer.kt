@@ -26,7 +26,8 @@ data class Snapshot(
     val movements: List<Movement>,
     val sessions: List<Session>,
     val counts: List<Count>,
-    val photos: Map<String, String> = emptyMap()
+    val photos: Map<String, String> = emptyMap(),
+    val alternateCodes: List<AlternateCode> = emptyList()
 )
 
 class Transfer(private val repo: InventoryRepository) {
@@ -34,6 +35,7 @@ class Transfer(private val repo: InventoryRepository) {
     private val json = Json { encodeDefaults = true }
 
     suspend fun snapshot(backup: Boolean): Snapshot = repo.db.withTransaction {
+        repo.requirePro()
         val articles = dao.items()
         val photos = mutableMapOf<String, String>()
         var bytes = 0
@@ -43,9 +45,9 @@ class Transfer(private val repo: InventoryRepository) {
             require(bytes <= MAX_BYTES / 2)
             photos[item.id] = Base64.getEncoder().encodeToString(photo)
         }
-        Snapshot(format = if (backup) "simpletools-inventory-backup" else "simpletools-inventory-report",
+        Snapshot(schemaVersion = 2, format = if (backup) "simpletools-inventory-backup" else "simpletools-inventory-report",
             articles = articles, labels = dao.allLabels(), movements = dao.movements(),
-            sessions = dao.allSessions(), counts = dao.allCounts(), photos = photos)
+            sessions = dao.allSessions(), counts = dao.allCounts(), photos = photos, alternateCodes = dao.allCodes())
     }
 
     suspend fun writeJson(output: OutputStream, backup: Boolean) {
@@ -55,28 +57,22 @@ class Transfer(private val repo: InventoryRepository) {
     }
 
     suspend fun restore(input: InputStream) {
-        val buffer = ByteArray(8192)
-        val bounded = ByteArrayOutputStream()
-        while (true) {
-            val n = input.read(buffer)
-            if (n < 0) break
-            require(bounded.size() + n <= MAX_BYTES)
-            bounded.write(buffer, 0, n)
-        }
-        val bytes = bounded.toByteArray()
-        require(bytes.size in 1..MAX_BYTES)
+        repo.requirePro()
+        val bytes = readBounded(input, MAX_BYTES)
         val data = json.decodeFromString(Snapshot.serializer(), bytes.decodeToString(throwOnInvalidSequence = true))
-        require(data.schemaVersion == 1 && data.format == "simpletools-inventory-backup")
+        require(data.schemaVersion in 1..2 && data.format == "simpletools-inventory-backup")
         val ids = data.articles.map { it.id }.toSet()
         val sessions = data.sessions.map { it.id }.toSet()
         require(ids.size == data.articles.size && sessions.size == data.sessions.size)
         require(data.counts.distinctBy { it.sessionId to it.itemId }.size == data.counts.size)
         require(data.movements.distinctBy { it.id }.size == data.movements.size)
         require(data.labels.distinctBy { it.kind to it.name }.size == data.labels.size)
-        require(data.articles.mapNotNull { it.code }.let { it.size == it.toSet().size })
         require(data.articles.mapNotNull { it.nfc }.let { it.size == it.toSet().size })
+        val codes = data.articles.mapNotNull { it.code } + data.alternateCodes.map { it.value }
+        require(codes.distinct().size == codes.size)
+        data.alternateCodes.forEach { require(it.itemId in ids && it.value.isNotBlank() && it.value.length <= 2048) }
         data.articles.forEach { InventoryRepository.validateItem(it) }
-        data.labels.forEach { require(it.kind in listOf("category", "location") && it.name.isNotBlank() && it.name.length <= 160) }
+        data.labels.forEach { require(it.kind in listOf("category", "location", "inventory") && it.name.isNotBlank() && it.name.length <= 160) }
         data.sessions.forEach { uuid(it.id); require(it.name.isNotBlank() && it.name.length <= 160) }
         data.movements.forEach {
             uuid(it.id)
@@ -98,13 +94,19 @@ class Transfer(private val repo: InventoryRepository) {
             }
         }
         repo.db.withTransaction {
+            repo.requirePro()
             // Refuse conflicts before writing. An identical import is idempotent.
             for (item in data.articles) {
                 val existing = dao.item(item.id)
                 require(existing == null || existing == item)
                 if (existing != null) require(samePhoto(dao.photo(item.id), photos[item.id]))
-                item.code?.let { require(dao.byCode(it)?.id in listOf(null, item.id)) }
+                item.code?.let { require(dao.byCode(it) == null || existing?.code == it) }
                 item.nfc?.let { require(dao.byNfc(it)?.id in listOf(null, item.id)) }
+            }
+            val currentCodes = dao.allCodes().associateBy { it.value }
+            for (code in data.alternateCodes) {
+                val owner = dao.byCode(code.value)
+                require(owner == null || currentCodes[code.value] == code)
             }
             val currentSessions = dao.allSessions().associateBy { it.id }
             data.sessions.forEach { require(currentSessions[it.id]?.let { old -> old == it } != false) }
@@ -114,10 +116,33 @@ class Transfer(private val repo: InventoryRepository) {
             data.counts.forEach { require(currentCounts[it.sessionId to it.itemId]?.let { old -> old == it } != false) }
             data.labels.forEach { dao.label(it) }
             data.articles.forEach { dao.putItem(it) }
+            data.alternateCodes.filter { it.value !in currentCodes }.forEach { dao.insertCode(it) }
             data.sessions.forEach { dao.putSession(it) }
             data.movements.filter { it.id !in currentMovements }.forEach { dao.insertMovement(it) }
             data.counts.forEach { dao.putCount(it) }
             photos.forEach { (key, value) -> dao.putPhoto(Photo(key, value)) }
+        }
+    }
+
+    suspend fun importCsv(input: InputStream): Int {
+        repo.requirePro()
+        val bytes = readBounded(input, MAX_CSV_BYTES)
+        val rows = parseArticlesCsv(bytes.decodeToString(throwOnInvalidSequence = true))
+        return repo.db.withTransaction {
+            repo.requirePro()
+            // Validate the entire batch, including collisions with the local catalog, before writing.
+            for ((item, _) in rows) {
+                InventoryRepository.validateItem(item)
+                item.code?.let { require(dao.byCode(it) == null) { "code" } }
+            }
+            for ((item, quantity) in rows) {
+                repo.save(item, quantity)
+                for ((kind, value) in listOf("category" to item.category, "location" to item.location,
+                    "inventory" to item.inventory)) {
+                    if (value.isNotBlank()) dao.label(Label(kind, value))
+                }
+            }
+            rows.size
         }
     }
 
@@ -127,7 +152,7 @@ class Transfer(private val repo: InventoryRepository) {
         writer.write("\uFEFF")
         val headers = listOf("type", "id", "article", "code", "reference", "categorie", "emplacement",
             "quantite", "unite", "achat", "vente", "devise", "date", "session", "theorique", "compte", "ecart",
-            "mouvement", "motif", "note", "archive")
+            "mouvement", "motif", "note", "archive", "inventaire", "fournisseur", "description", "seuil")
         fun row(vararg values: Pair<String, String>) {
             val cells = values.toMap()
             writer.append(headers.joinToString(";") { csvCell(cells[it].orEmpty()) }).append("\r\n")
@@ -137,11 +162,12 @@ class Transfer(private val repo: InventoryRepository) {
             row("type" to "article", "id" to it.id, "article" to it.name, "code" to it.code.orEmpty(),
                 "reference" to it.reference, "categorie" to it.category, "emplacement" to it.location,
                 "quantite" to decimal(it.quantity), "unite" to it.unit, "achat" to it.buy?.let(::decimal).orEmpty(),
-                "vente" to it.sell?.let(::decimal).orEmpty(), "devise" to it.currency, "archive" to it.archived.toString())
+                "vente" to it.sell?.let(::decimal).orEmpty(), "devise" to it.currency, "archive" to it.archived.toString(), "inventaire" to it.inventory,
+                "fournisseur" to it.supplier, "description" to it.description, "seuil" to decimal(it.threshold))
         }
         s.movements.forEach {
             row("type" to "mouvement", "id" to it.itemId, "article" to it.itemName, "quantite" to decimal(it.delta),
-                "date" to Instant.ofEpochMilli(it.time).toString(), "session" to it.sessionId.orEmpty(),
+                "unite" to it.unit.orEmpty(), "date" to Instant.ofEpochMilli(it.time).toString(), "session" to it.sessionId.orEmpty(),
                 "mouvement" to it.kind.name, "motif" to it.reason, "note" to it.note)
         }
         s.counts.forEach {
@@ -222,7 +248,21 @@ class Transfer(private val repo: InventoryRepository) {
         }
     }
 
+    private fun readBounded(input: InputStream, maximum: Int): ByteArray {
+        val buffer = ByteArray(8192)
+        val bounded = ByteArrayOutputStream()
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            require(bounded.size() + n <= maximum)
+            bounded.write(buffer, 0, n)
+        }
+        require(bounded.size() > 0)
+        return bounded.toByteArray()
+    }
+
     companion object {
+        const val MAX_CSV_BYTES = 4 * 1024 * 1024
         const val MAX_BYTES = 20 * 1024 * 1024
         fun csvCell(value: String): String {
             val dangerous = value.trimStart().firstOrNull() in listOf('=', '+', '-', '@') &&

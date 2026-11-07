@@ -3,7 +3,10 @@ package com.simpletools.inventory
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
 import android.nfc.NdefRecord
+import android.os.ParcelFileDescriptor
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -23,6 +26,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
@@ -35,7 +39,7 @@ class InventoryAndroidTest {
 
     @Test fun catalogSearchAndStock() = runBlocking {
         database().useDatabase { db ->
-            val repo = InventoryRepository(db)
+            val repo = InventoryRepository(db) { true }
             val item = repo.save(Item(name = "Vis", code = "123", reference = "R1", category = "Métal",
                 location = "Atelier", threshold = scaled("30")), scaled("20"))
             repo.save(item.copy(name = "Vis inox"))
@@ -43,7 +47,7 @@ class InventoryAndroidTest {
             repo.move(item.id, Kind.IN, scaled("10"))
             repo.move(item.id, Kind.OUT, scaled("4"))
             assertEquals(scaled("26"), repo.dao.item(item.id)?.quantity)
-            repo.move(item.id, Kind.ADJUST, scaled("-1,5"))
+            repo.move(item.id, Kind.ADJUST, scaled("-1,5"), "Correction manuelle")
             assertEquals(scaled("24.5"), repo.dao.item(item.id)?.quantity)
             assertTrue(runCatching { repo.move(item.id, Kind.OUT, scaled("100")) }.isFailure)
             assertEquals(1, repo.dao.low().first())
@@ -60,7 +64,7 @@ class InventoryAndroidTest {
 
     @Test fun transactionsAndPhysicalCount() = runBlocking {
         database().useDatabase { db ->
-            val repo = InventoryRepository(db)
+            val repo = InventoryRepository(db) { true }
             val item = repo.save(Item(name = "Boîte"))
             (1..20).map { async(Dispatchers.IO) { repo.move(item.id, Kind.IN, scaled("1")) } }.awaitAll()
             val session = repo.start("Réserve")
@@ -89,8 +93,9 @@ class InventoryAndroidTest {
             val backup = ByteArrayOutputStream()
             var itemId = ""
             database().useDatabase { db ->
-                val repo = InventoryRepository(db)
+                val repo = InventoryRepository(db) { true }
                 itemId = repo.save(Item(name = "Étagère", code = "789"), 1250, photo, true).id
+                repo.addCode(itemId, "789-alias")
                 val transfer = Transfer(repo)
                 assertTrue(ByteArrayOutputStream().also { transfer.csv(it) }.toString("UTF-8").contains("Étagère"))
                 assertTrue(ByteArrayOutputStream().also { transfer.writeJson(it, false) }.toString("UTF-8").contains("schemaVersion"))
@@ -98,13 +103,14 @@ class InventoryAndroidTest {
                 transfer.writeJson(backup, true)
             }
             Room.databaseBuilder(context, InventoryDatabase::class.java, dbName).build().useDatabase { db ->
-                val repo = InventoryRepository(db)
+                val repo = InventoryRepository(db) { true }
                 val transfer = Transfer(repo)
                 transfer.restore(ByteArrayInputStream(backup.toByteArray()))
                 transfer.restore(ByteArrayInputStream(backup.toByteArray()))
                 assertTrue(runCatching { transfer.restore(ByteArrayInputStream("{broken".toByteArray())) }.isFailure)
                 assertEquals(1, repo.dao.items().size)
                 assertArrayEquals(photo, repo.dao.photo(itemId))
+                assertEquals(itemId, repo.dao.byCode("789-alias")?.id)
                 assertEquals(1, repo.dao.movements().size)
             }
             Room.databaseBuilder(context, InventoryDatabase::class.java, dbName).build().useDatabase { db ->
@@ -112,6 +118,95 @@ class InventoryAndroidTest {
             }
         } finally {
             context.deleteDatabase(dbName)
+        }
+    }
+
+    @Test fun freeLimitIsTransactionalAndRevocationKeepsExistingData() = runBlocking {
+        database().useDatabase { db ->
+            var pro = false
+            val repo = InventoryRepository(db) { pro }
+            val first = repo.save(Item(name = "Article initial"))
+            (2..49).forEach { repo.save(Item(name = "Article $it")) }
+            val attempts = (50..51).map { i ->
+                async(Dispatchers.IO) { runCatching { repo.save(Item(name = "Article $i")) } }
+            }.awaitAll()
+            assertEquals(1, attempts.count { it.isSuccess })
+            assertEquals("free_limit", attempts.first { it.isFailure }.exceptionOrNull()?.message)
+            assertEquals(50, repo.dao.itemCount())
+            pro = true
+            val extra = repo.save(Item(name = "Au-delà de la limite", inventory = "Dépôt"), 4000)
+            repo.addCode(extra.id, "BIS")
+            assertEquals(extra.id, repo.dao.byCode("BIS")?.id)
+            assertEquals(extra.id, repo.dao.search("BIS", 0, 0, false, 10, 0, "Dépôt").first().single().id)
+            assertEquals("code", runCatching { repo.save(first.copy(code = "BIS")) }.exceptionOrNull()?.message)
+            pro = false
+            repo.save(extra.copy(name = "Toujours modifiable"))
+            repeat(55) { repo.move(extra.id, Kind.IN, 1000) }
+            repo.move(extra.id, Kind.OUT, 3000)
+            assertEquals(56_000L, repo.dao.item(extra.id)?.quantity)
+            assertEquals(57, repo.dao.history(extra.id).first().size)
+            assertEquals("pro", runCatching { repo.move(extra.id, Kind.ADJUST, 1000, "Motif") }.exceptionOrNull()?.message)
+            assertEquals("pro", runCatching { repo.start("Comptage") }.exceptionOrNull()?.message)
+            assertEquals("pro", runCatching { repo.createLabelCode(first.id) }.exceptionOrNull()?.message)
+            assertEquals("pro", runCatching { Transfer(repo).csv(ByteArrayOutputStream()) }.exceptionOrNull()?.message)
+            assertEquals("free_limit", runCatching { repo.save(Item(name = "Bloqué")) }.exceptionOrNull()?.message)
+            assertEquals(51, repo.dao.itemCount())
+        }
+    }
+
+    @Test fun csvImportChecksConflictsBeforeWritingAndLabelUsesCatalogCode() = runBlocking {
+        database().useDatabase { db ->
+            val repo = InventoryRepository(db) { true }
+            val transfer = Transfer(repo)
+            repo.save(Item(name = "Existant", code = "A"))
+            fun csv(rows: String) = ByteArrayInputStream(("article;code;quantite;inventaire\n" + rows).toByteArray())
+            assertTrue(runCatching { transfer.importCsv(csv("Valide;B;2;Dépôt\nCollision;A;1;Dépôt")) }.isFailure)
+            assertNull(repo.dao.byCode("B"))
+            assertEquals(1, repo.dao.itemCount())
+            assertEquals(1, transfer.importCsv(csv("Valide;B;2,5;Dépôt")))
+            val imported = requireNotNull(repo.dao.byCode("B"))
+            assertEquals(2500L, imported.quantity)
+            assertEquals("Dépôt", imported.inventory)
+            assertEquals(1, repo.dao.history(imported.id).first().size)
+            val fresh = repo.save(Item(name = "Étiquette"))
+            val labeled = repo.createLabelCode(fresh.id)
+            assertEquals(labeled.id, repo.dao.byCode(labeled.labelCode())?.id)
+            for (fixture in listOf(labeled, labeled.copy(code = "INV-24"))) {
+                val bytes = ByteArrayOutputStream()
+                writeProductLabel(fixture, bytes)
+                assertTrue(bytes.toString("ISO-8859-1").startsWith("%PDF-"))
+                assertPrintedLabelDecodes(fixture.labelCode(), bytes.toByteArray())
+            }
+        }
+    }
+
+    private fun assertPrintedLabelDecodes(expected: String, pdf: ByteArray) {
+        val file = File.createTempFile("inventory-label", ".pdf", context.cacheDir)
+        try {
+            file.writeBytes(pdf)
+            val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            PdfRenderer(fd).use { renderer ->
+                renderer.openPage(0).use { page ->
+                    // Render the area a user frames with the camera, at three pixels per PDF point.
+                    val bitmap = Bitmap.createBitmap(936, 576, Bitmap.Config.ARGB_8888)
+                    val frame = Matrix().apply {
+                        setScale(3f, 3f)
+                        postTranslate(-90f, -270f)
+                    }
+                    val client = BarcodeScanning.getClient()
+                    try {
+                        bitmap.eraseColor(Color.WHITE)
+                        page.render(bitmap, null, frame, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                        val result = Tasks.await(client.process(InputImage.fromBitmap(bitmap, 0)), 20, TimeUnit.SECONDS)
+                        assertTrue("Could not scan $expected from rendered label", result.any { it.rawValue == expected })
+                    } finally {
+                        client.close()
+                        bitmap.recycle()
+                    }
+                }
+            }
+        } finally {
+            file.delete()
         }
     }
 
@@ -123,7 +218,7 @@ class InventoryAndroidTest {
         val value = TagIdentity.identify(arrayOf(record), uid)
         assertEquals("ndef:shelf-17", value)
         database().useDatabase { db ->
-            val repo = InventoryRepository(db)
+            val repo = InventoryRepository(db) { true }
             val item = repo.save(Item(name = "Bac", nfc = value))
             assertEquals(item.id, repo.dao.byNfc(requireNotNull(value))?.id)
         }
