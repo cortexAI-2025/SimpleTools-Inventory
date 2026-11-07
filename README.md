@@ -1,6 +1,6 @@
 # SimpleTools Inventory · by AIWORKPAY
 
-Application Android locale pour les stocks et les inventaires. Android 10 ou plus récent, package `com.simpletools.inventory`, version 1.0.0.
+Application Android locale pour les stocks et les inventaires. Android 10 ou plus récent, package `com.simpletools.inventory`, version 1.3.0.
 
 ## Compilation
 
@@ -17,7 +17,7 @@ Le scanner utilise le modèle ML Kit embarqué. Le NFC lit un identifiant NDEF d
 ### Fichiers
 
 - CSV UTF-8 avec BOM, séparateur point-virgule, catalogue, mouvements et comptages.
-- Rapport JSON `simpletools-inventory-report`, avec `schemaVersion: 1`, `articles`, `labels` (catégories et emplacements, distingués par `kind`), `movements`, `sessions` et `counts`. Dates en millisecondes Unix, quantités et prix en millièmes.
+- Rapport JSON `simpletools-inventory-report`, avec `schemaVersion: 2`, `articles`, `labels` (catégories et emplacements, distingués par `kind`), `movements`, `sessions` et `counts`. Dates en millisecondes Unix, quantités et prix en millièmes.
 - PDF paginé par stock ou session de comptage.
 - Sauvegarde JSON séparée `simpletools-inventory-backup`, mêmes données et dictionnaire `photos` qui associe les UUID aux JPEG encodés en Base64. Taille maximale du fichier de 20 Mio, avec plafond cumulé de 10 Mio de JPEG avant encodage. Réimport identique possible. Les conflits rejettent l’ensemble de l’import. Thème, langue et choix de notification sont des préférences propres à l’appareil.
 
@@ -36,3 +36,7 @@ Les photos sont stockées dans une table privée distincte et chargées à la de
 - [ ] Fermer et rouvrir. Vérifier la persistance.
 - [ ] Tester lecture et association NFC si l’appareil dispose du matériel.
 - [ ] Vérifier le parcours principal sans Wi-Fi ni données mobiles.
+
+## FREE et PRO
+
+Consulter la [grille FREE / PRO et les règles de licence](docs/MONETIZATION.md), la [préparation Play](docs/PLAY_CONSOLE.md), la [recette V1.3 sur Galaxy A14](docs/TESTING_GALAXY_A14.md) et les [notes de version FR/EN](docs/RELEASE_NOTES.md). Les sauvegardes V1 restent importables.

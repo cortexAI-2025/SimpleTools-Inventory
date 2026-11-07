@@ -1,7 +1,10 @@
 package com.simpletools.inventory.core
 
 import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.Serializable
 import java.math.BigDecimal
 import java.util.UUID
@@ -34,10 +37,31 @@ data class Item(
     val created: Long = System.currentTimeMillis(),
     val modified: Long = created,
     val notes: String = "",
-    val archived: Boolean = false
+    val archived: Boolean = false,
+    @ColumnInfo(defaultValue = "''") val inventory: String = "",
+    @ColumnInfo(defaultValue = "''") val supplier: String = ""
 )
 
+@Serializable
+@Entity(indices = [Index("itemId")], foreignKeys = [ForeignKey(
+    entity = Item::class, parentColumns = ["id"], childColumns = ["itemId"], onDelete = ForeignKey.CASCADE
+)])
+data class AlternateCode(@PrimaryKey val value: String, val itemId: String)
+
 @Serializable enum class Kind { IN, OUT, ADJUST, COUNT }
+
+fun stockChange(current: Long, kind: Kind, amount: Long): Pair<Long, Long> {
+    require(current in 0..LIMIT && amount in -LIMIT..LIMIT)
+    require(kind !in listOf(Kind.IN, Kind.OUT) || amount > 0)
+    val delta = when (kind) {
+        Kind.OUT -> -amount
+        Kind.COUNT -> amount - current
+        else -> amount
+    }
+    val next = current + delta
+    require(next in 0..LIMIT) { "quantity" }
+    return delta to next
+}
 
 @Serializable
 @Entity(indices = [Index(value = ["itemId", "time"]), Index("sessionId")])
@@ -50,7 +74,8 @@ data class Movement(
     val time: Long = System.currentTimeMillis(),
     val reason: String = "",
     val note: String = "",
-    val sessionId: String? = null
+    val sessionId: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val unit: String? = null
 )
 
 @Serializable
@@ -63,7 +88,8 @@ data class Session(
     @PrimaryKey val id: String = id(),
     val name: String,
     val created: Long = System.currentTimeMillis(),
-    val closed: Long? = null
+    val closed: Long? = null,
+    @ColumnInfo(defaultValue = "NULL") val inventory: String? = null
 )
 
 @Serializable
@@ -85,18 +111,22 @@ data class UnitTotal(val unit: String, val quantity: Long)
 @Dao
 interface InventoryDao {
     @Query("""
-        SELECT * FROM Item WHERE archived = :archived AND
+        SELECT * FROM Item WHERE archived = :archived AND (:inventory IS NULL OR inventory = :inventory) AND
         (instr(lower(name), lower(:term)) > 0 OR instr(lower(reference), lower(:term)) > 0
             OR instr(lower(coalesce(code, '')), lower(:term)) > 0
+            OR EXISTS (SELECT 1 FROM AlternateCode WHERE itemId = Item.id AND instr(lower(value), lower(:term)) > 0)
             OR instr(lower(category), lower(:term)) > 0 OR instr(lower(location), lower(:term)) > 0)
         AND (:filter = 0 OR (:filter = 1 AND quantity < threshold) OR (:filter = 2 AND quantity = 0))
         ORDER BY CASE WHEN :sort = 1 THEN quantity END,
             CASE WHEN :sort = 2 THEN modified END DESC, name COLLATE NOCASE, id
         LIMIT :limit OFFSET :offset
     """)
-    fun search(term: String, filter: Int, sort: Int, archived: Boolean, limit: Int, offset: Int): Flow<List<Item>>
+    fun search(term: String, filter: Int, sort: Int, archived: Boolean, limit: Int, offset: Int, inventory: String? = null): Flow<List<Item>>
 
     @Query("SELECT * FROM Item ORDER BY name COLLATE NOCASE, id") suspend fun items(): List<Item>
+    @Query("SELECT * FROM Item ORDER BY name COLLATE NOCASE, id") fun observeItems(): Flow<List<Item>>
+    @Query("SELECT count(*) FROM Item") suspend fun itemCount(): Int
+    @Query("SELECT count(*) FROM Item") fun catalogSize(): Flow<Int>
     @Query("SELECT count(*) FROM Item WHERE archived = 0") fun references(): Flow<Int>
     @Query("SELECT unit, sum(quantity) AS quantity FROM Item WHERE archived = 0 GROUP BY unit ORDER BY unit")
     fun totals(): Flow<List<UnitTotal>>
@@ -104,11 +134,16 @@ interface InventoryDao {
     @Query("SELECT count(*) FROM Item WHERE archived = 0 AND quantity = 0") fun empty(): Flow<Int>
     @Query("SELECT * FROM Item WHERE id = :id") suspend fun item(id: String): Item?
     @Query("SELECT * FROM Item WHERE id = :id") fun observeItem(id: String): Flow<Item?>
-    @Query("SELECT * FROM Item WHERE code = :value") suspend fun byCode(value: String): Item?
+    @Query("SELECT * FROM Item WHERE code = :value OR id = (SELECT itemId FROM AlternateCode WHERE value = :value)") suspend fun byCode(value: String): Item?
     @Query("SELECT * FROM Item WHERE nfc = :value") suspend fun byNfc(value: String): Item?
+    @Query("SELECT value FROM AlternateCode WHERE itemId = :id ORDER BY value") fun codes(id: String): Flow<List<String>>
+    @Query("SELECT * FROM AlternateCode") suspend fun allCodes(): List<AlternateCode>
+    @Insert suspend fun insertCode(code: AlternateCode)
+    @Query("DELETE FROM AlternateCode WHERE itemId = :id AND value = :value") suspend fun deleteCode(id: String, value: String)
     @Upsert suspend fun putItem(item: Item)
     @Query("DELETE FROM Item WHERE id = :id") suspend fun deleteItem(id: String)
     @Query("SELECT * FROM Movement ORDER BY time DESC, id") suspend fun movements(): List<Movement>
+    @Query("SELECT * FROM Movement ORDER BY time DESC, id") fun observeMovements(): Flow<List<Movement>>
     @Query("SELECT * FROM Movement ORDER BY time DESC, id LIMIT 8") fun recent(): Flow<List<Movement>>
     @Query("SELECT * FROM Movement WHERE itemId = :id ORDER BY time DESC, id") fun history(id: String): Flow<List<Movement>>
     @Insert suspend fun insertMovement(movement: Movement)
@@ -130,23 +165,46 @@ interface InventoryDao {
     @Query("DELETE FROM Photo WHERE itemId = :id") suspend fun deletePhoto(id: String)
 }
 
-@Database(entities = [Item::class, Movement::class, Label::class, Session::class, Count::class, Photo::class],
-    version = 1, exportSchema = false)
+@Database(entities = [Item::class, Movement::class, Label::class, Session::class, Count::class, Photo::class, AlternateCode::class],
+    version = 2, exportSchema = false)
 abstract class InventoryDatabase : RoomDatabase() {
     abstract fun inventory(): InventoryDao
 }
 
-class InventoryRepository(val db: InventoryDatabase) {
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE Item ADD COLUMN inventory TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE Item ADD COLUMN supplier TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE Session ADD COLUMN inventory TEXT DEFAULT NULL")
+        db.execSQL("ALTER TABLE Movement ADD COLUMN unit TEXT DEFAULT NULL")
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS AlternateCode (
+                value TEXT NOT NULL PRIMARY KEY, itemId TEXT NOT NULL,
+                FOREIGN KEY(itemId) REFERENCES Item(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_AlternateCode_itemId ON AlternateCode(itemId)")
+    }
+}
+
+class InventoryRepository(val db: InventoryDatabase, private val licensed: () -> Boolean = { false }) {
+    fun requirePro() { check(licensed()) { "pro" } }
     val dao = db.inventory()
 
-    suspend fun save(item: Item, initial: Long = 0, photo: ByteArray? = null, replacePhoto: Boolean = false): Item =
+    suspend fun save(item: Item, initial: Long = 0, photo: ByteArray? = null, replacePhoto: Boolean = false, duplicate: Boolean = false): Item =
         db.withTransaction {
             val old = dao.item(item.id)
+            if (old == null && !licensed()) check(canCreateFree(dao.itemCount())) { "free_limit" }
+            if (duplicate || (item.archived && old?.archived != true) ||
+                item.threshold != (old?.threshold ?: 0L) || item.inventory != (old?.inventory ?: "") ||
+                item.supplier != (old?.supplier ?: "")) requirePro()
             val normalized = item.copy(name = item.name.trim(), code = item.code?.trim()?.ifEmpty { null },
                 nfc = item.nfc?.trim()?.ifEmpty { null }, quantity = old?.quantity ?: 0,
                 created = old?.created ?: item.created, modified = System.currentTimeMillis())
             validateItem(normalized)
             require(initial in 0..LIMIT)
+            require(normalized.code == null || normalized.code == old?.code ||
+                normalized.code !in dao.codes(item.id).first()) { "code" }
             require(normalized.code?.let { dao.byCode(it)?.id in listOf(null, item.id) } != false) { "code" }
             require(normalized.nfc?.let { dao.byNfc(it)?.id in listOf(null, item.id) } != false) { "nfc" }
             require(old == null || old.unit == normalized.unit || old.quantity == 0L) { "unit" }
@@ -162,6 +220,38 @@ class InventoryRepository(val db: InventoryDatabase) {
             requireNotNull(dao.item(item.id))
         }
 
+    suspend fun addLabel(kind: String, name: String) = db.withTransaction {
+        val normalized = name.trim()
+        require(kind in listOf("category", "location", "inventory") && normalized.length in 1..160)
+        if (kind == "inventory") requirePro()
+        val label = Label(kind, normalized)
+        if (!licensed()) {
+            val existing = dao.allLabels()
+            val limit = if (kind == "category") FREE_ITEMS else 1
+            check(label in existing || existing.count { it.kind == kind } < limit) { "label_limit" }
+        }
+        dao.label(label)
+    }
+
+    suspend fun createLabelCode(itemId: String): Item = db.withTransaction {
+        requirePro()
+        val item = requireNotNull(dao.item(itemId))
+        if (item.code != null) item else save(item.copy(code = item.id))
+    }
+
+    suspend fun addCode(id: String, value: String) = db.withTransaction {
+        requirePro()
+        val code = value.trim()
+        require(code.isNotBlank() && code.length <= 2048 && dao.item(id) != null)
+        require(dao.byCode(code) == null) { "code" }
+        dao.insertCode(AlternateCode(code, id))
+    }
+
+    suspend fun removeCode(id: String, value: String) = db.withTransaction {
+        requirePro()
+        dao.deleteCode(id, value)
+    }
+
     suspend fun delete(id: String) = db.withTransaction {
         dao.deletePhoto(id)
         dao.deleteItem(id)
@@ -170,37 +260,35 @@ class InventoryRepository(val db: InventoryDatabase) {
     suspend fun move(id: String, kind: Kind, amount: Long, reason: String = "", note: String = "") =
         db.withTransaction {
             require(kind != Kind.COUNT)
+            if (kind == Kind.ADJUST) {
+                requirePro()
+                require(reason.isNotBlank()) { "reason" }
+            }
             applyMovement(requireNotNull(dao.item(id)), kind, amount, reason, note, null)
         }
 
     private suspend fun applyMovement(item: Item, kind: Kind, amount: Long, reason: String, note: String, session: String?) {
         require(!item.archived)
-        require(amount in -LIMIT..LIMIT)
-        require(kind !in listOf(Kind.IN, Kind.OUT) || amount > 0)
-        val delta = when (kind) {
-            Kind.OUT -> -amount
-            Kind.COUNT -> amount - item.quantity
-            else -> amount
-        }
-        val next = Math.addExact(item.quantity, delta)
-        require(next in 0..LIMIT) { "quantity" }
+        val (delta, next) = stockChange(item.quantity, kind, amount)
         if (delta == 0L) return
         dao.insertMovement(Movement(itemId = item.id, itemName = item.name, kind = kind,
-            delta = delta, reason = reason, note = note, sessionId = session))
+            delta = delta, reason = reason, note = note, sessionId = session, unit = item.unit))
         dao.putItem(item.copy(quantity = next, modified = System.currentTimeMillis()))
     }
 
-    suspend fun start(name: String): Session = db.withTransaction {
+    suspend fun start(name: String, inventory: String? = null): Session = db.withTransaction {
+        requirePro()
         require(name.isNotBlank() && name.length <= 160)
-        val session = Session(name = name.trim())
+        val session = Session(name = name.trim(), inventory = inventory)
         dao.putSession(session)
-        dao.items().filterNot { it.archived }.forEach {
+        dao.items().filter { !it.archived && (inventory == null || it.inventory == inventory) }.forEach {
             dao.putCount(Count(session.id, it.id, it.name, it.quantity, unit = it.unit))
         }
         session
     }
 
     suspend fun count(session: String, item: String, actual: Long) = db.withTransaction {
+        requirePro()
         require(actual in 0..LIMIT)
         require(requireNotNull(dao.session(session)).closed == null)
         val row = requireNotNull(dao.sessionCounts(session).find { it.itemId == item })
@@ -208,6 +296,7 @@ class InventoryRepository(val db: InventoryDatabase) {
     }
 
     suspend fun finalize(session: String) = db.withTransaction {
+        requirePro()
         val header = requireNotNull(dao.session(session))
         require(header.closed == null)
         val counted = dao.sessionCounts(session).filter { it.actual != null }
@@ -221,11 +310,14 @@ class InventoryRepository(val db: InventoryDatabase) {
     }
 
     companion object {
+        const val FREE_ITEMS = 50
+        fun canCreateFree(current: Int): Boolean = current < FREE_ITEMS
         const val MAX_PHOTO_BYTES = 700_000
         fun validateItem(item: Item) {
             require(UUID.fromString(item.id).toString() == item.id)
             require(item.name.isNotBlank() && item.name.length <= 160)
             require(item.unit.isNotBlank() && item.unit.length <= 40)
+            require(item.inventory.length <= 160 && item.supplier.length <= 160)
             require(item.category.length <= 160 && item.location.length <= 160 && item.reference.length <= 160)
             require(item.description.length <= 4000 && item.notes.length <= 4000)
             require(item.quantity in 0..LIMIT && item.threshold in 0..LIMIT)
